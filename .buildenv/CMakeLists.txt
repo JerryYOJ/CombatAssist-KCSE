@@ -1,6 +1,6 @@
 project(CombatAssist LANGUAGES CXX)
 
-file(GLOB_RECURSE PLUGIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../*.cpp")
+file(GLOB_RECURSE PLUGIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../src/*.cpp")
 
 add_library(CombatAssist SHARED ${PLUGIN_SOURCES})
 
@@ -12,7 +12,7 @@ target_compile_definitions(CombatAssist PRIVATE
 target_compile_options(CombatAssist PRIVATE /utf-8 /W4 /wd4819 /wd4100)
 
 target_include_directories(CombatAssist PRIVATE
-    ${RE_ROOT} ${RE_ROOT}/CryEngine/CryCommon ${RE_ROOT}/Projects/KCSE)
+    ${RE_ROOT}/include ${RE_ROOT}/include/CryEngine/CryCommon ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 
 target_link_libraries(CombatAssist PRIVATE kcd_re spdlog::spdlog)
 
