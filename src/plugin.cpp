@@ -1,16 +1,29 @@
 #include "KCSE/KCSEAPI.h"
 #include "Offsets/Offsets.h"
+#include "Offsets/Offsets_VTABLE.h"
 #include "entitymodule/C_Actor.h"
 #include "combatmodule/C_CombatActor.h"
+#include "combatmodule/C_CombatActorHuntAttack.h"
+#include "game/S_GameContext.h"
+#include "vtable_hook.h"
 #include <cstdlib>
 
-int alwaysPB = 0;       // 1 = always auto perfect block
-int alwaysMS = 0;       // 1 = always auto master strike when riposte window open
-int chancePB = 0;       // 0-100: percentage chance to auto PB per trigger (0 = disabled)
-int chanceMS = 0;       // 0-100: percentage chance to auto MS per trigger (0 = disabled)
-int alwaysHuntPB = 0;   // 1 = auto PB specifically during hunt/gap-close attacks
-int alwaysHuntMS = 0;   // 1 = auto MS specifically during hunt attacks
-int autoCounter = 0;    // consumable charge: auto-react this many times then stop, decrements each use
+// -----------------------------------------------
+// CVars
+// -----------------------------------------------
+
+int alwaysPB = 0;
+int alwaysMS = 0;
+int chancePB = 0;
+int chanceMS = 0;
+int alwaysHuntPB = 0;
+int alwaysHuntMS = 0;
+int autoCounter = 0;
+int alwaysTackle = 0;
+
+// -----------------------------------------------
+// Helpers
+// -----------------------------------------------
 
 static wh::combatmodule::C_CombatActor* GetPlayerCombatActor()
 {
@@ -24,6 +37,53 @@ static bool RollChance(int percent)
     return percent > 0 && (rand() % 100) < percent;
 }
 
+static bool IsInHuntAttack(wh::combatmodule::C_CombatActor* actor)
+{
+    auto&& director = actor->m_pDirector;
+    for (auto&& act : director->m_actions) {
+        auto* hunt = kcd_cast<wh::combatmodule::C_CombatActorActionSyncHit*>(act.get());
+        if (hunt && hunt->m_params.m_pDataRow->GetActionTypeId() == Offsets::ActionTypeId::HuntAttackSlave()) return true;
+    }
+
+    return false;
+}
+
+// -----------------------------------------------
+// Hunt Attack (Tackle) hook
+// -----------------------------------------------
+// Hooks I_CombatActorHuntAttack vtable slot [1] (TryHuntAttack).
+// For the player: bypasses speed/distance/angle checks but keeps
+// "is victim in combat?" to avoid showing prompt on random NPCs.
+
+using TryHuntAttackFn = wh::combatmodule::E_HuntAttackResult(__fastcall*)(
+    wh::combatmodule::I_CombatActorHuntAttack*, EntityId);
+static TryHuntAttackFn g_origTryHuntAttack = nullptr;
+
+static wh::combatmodule::E_HuntAttackResult __fastcall Hooked_TryHuntAttack(
+    wh::combatmodule::I_CombatActorHuntAttack* self, EntityId victimEntityId)
+{
+    if (alwaysTackle) {
+        auto* huntObj = static_cast<wh::combatmodule::C_CombatActorHuntAttack*>(self);
+        if (huntObj->m_pOwner == GetPlayerCombatActor()) {
+            auto* victim = wh::game::S_GameContext::GetInstance()->GetActorById(victimEntityId);
+            if (!victim)
+                return g_origTryHuntAttack(self, victimEntityId);
+
+            auto* victimCombat = victim->GetOrCreateCombatActor();
+            if (!victimCombat || !victimCombat->m_pState || !victimCombat->m_pState->m_isInCombat)
+                return g_origTryHuntAttack(self, victimEntityId);
+            
+            huntObj->Request(victimEntityId);
+            return wh::combatmodule::E_HuntAttackResult::Approved;
+        }
+    }
+    return g_origTryHuntAttack(self, victimEntityId);
+}
+
+// -----------------------------------------------
+// Auto Perfect Block / Master Strike
+// -----------------------------------------------
+
 static void AutoPerfectBlock()
 {
     auto* player = GetPlayerCombatActor();
@@ -35,8 +95,7 @@ static void AutoPerfectBlock()
     if (state->m_pbTriggerCount <= 0 || state->m_isBlocking || state->m_isPerfectBlocking)
         return;
 
-    // TODO: detect hunt attacks from combat state to gate alwaysHuntPB/MS separately
-    bool isHunt = state->m_isInHuntAttack;
+    bool isHunt = IsInHuntAttack(player);
 
     bool wantMS = alwaysMS || (isHunt && alwaysHuntMS) || RollChance(chanceMS) || autoCounter > 0;
     bool wantPB = alwaysPB || (isHunt && alwaysHuntPB) || RollChance(chancePB) || autoCounter > 0;
@@ -44,7 +103,6 @@ static void AutoPerfectBlock()
     if (!wantMS && !wantPB)
         return;
 
-    // Prefer master strike over perfect block
     if (wantMS && state->m_syncRiposteTriggerCount > 0) {
         wh::combatmodule::I_CombatActorActionPtr outAction;
         player->DispatchCounterAction(&outAction,
@@ -52,8 +110,7 @@ static void AutoPerfectBlock()
         if (autoCounter > 0) --autoCounter;
         return;
     }
-
-    if (wantPB) {
+    else if (wantPB) {
         wh::combatmodule::I_CombatActorActionPtr outAction;
         player->DispatchCounterAction(&outAction,
             wh::combatmodule::E_CounterActionType::PerfectBlock, 0);
@@ -61,11 +118,19 @@ static void AutoPerfectBlock()
     }
 }
 
+// -----------------------------------------------
+// Frame tick
+// -----------------------------------------------
+
 static void FrameTick()
 {
     AutoPerfectBlock();
     KCSE::GetTaskInterface()->AddTask(FrameTick);
 }
+
+// -----------------------------------------------
+// Plugin entry
+// -----------------------------------------------
 
 KCSE_PLUGIN_INFO("Combat Assist", "JerryYOJ", 1);
 KCSE_PLUGIN_LOAD(kcse)
@@ -81,8 +146,14 @@ KCSE_PLUGIN_LOAD(kcse)
             con->RegisterCVarInt("kcse_ca_alwaysHuntPB", &alwaysHuntPB, 0, VF_NULL, "1 = auto PB during hunt attacks");
             con->RegisterCVarInt("kcse_ca_alwaysHuntMS", &alwaysHuntMS, 0, VF_NULL, "1 = auto MS during hunt attacks");
             con->RegisterCVarInt("kcse_ca_autoCounter",  &autoCounter,  0, VF_NULL, "N = auto-react N times then stop");
+            con->RegisterCVarInt("kcse_ca_alwaysTackle", &alwaysTackle, 0, VF_NULL, "1 = player can always tackle");
 
-            SSystemGlobalEnvironment::GetInstance()->pLog->LogAlways("[CombatAssist] CVars registered, DataLoaded");
+            // Hook TryHuntAttack — patch I_CombatActorHuntAttack vtable slot [1]
+            using HuntVT = wh::combatmodule::C_CombatActorHuntAttack;
+            g_origTryHuntAttack = VtableHook::SwapByOffset<TryHuntAttackFn>(
+                Offsets::GetBase(), HuntVT::VTABLE[1], 1, Hooked_TryHuntAttack);
+
+            SSystemGlobalEnvironment::GetInstance()->pLog->LogAlways("[CombatAssist] CVars registered, hooks installed");
         }
     });
 
