@@ -73,7 +73,6 @@ static wh::combatmodule::E_HuntAttackResult __fastcall Hooked_TryHuntAttack(
             if (!victimCombat || !victimCombat->m_pState || !victimCombat->m_pState->m_isInCombat)
                 return g_origTryHuntAttack(self, victimEntityId);
             
-            huntObj->Request(victimEntityId);
             return wh::combatmodule::E_HuntAttackResult::Approved;
         }
     }
